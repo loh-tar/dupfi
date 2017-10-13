@@ -1,0 +1,313 @@
+#!/bin/dash
+# I try to keep it POSIX conform
+# Using dash is as side effect faster than e.g. bash
+
+#
+#   dupfi - A Duplicate Finder
+#
+#   Copyright (C) 2017 loh.tar@googlemail.com
+#
+#   This program is free software; you can redistribute it and/or modify
+#   it under the terms of the GNU General Public License as published by
+#   the Free Software Foundation; either version 2 of the License, or
+#   (at your option) any later version.
+#
+#   This program is distributed in the hope that it will be useful,
+#   but WITHOUT ANY WARRANTY; without even the implied warranty of
+#   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#   GNU General Public License for more details.
+#
+#   You should have received a copy of the GNU General Public License
+#   along with this program; if not, write to the Free Software
+#   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston,
+#   MA 02110-1301, USA.
+
+# Inspired by https://unix.stackexchange.com/a/71201
+
+me=$(basename "$0")
+version="0.1"
+vDate="Okt 2017"
+optPrint="0"
+optQuiet="0"
+optShow="0"
+optDull="0"
+
+startDir=""                       # Yes, here has find to look for
+findOptions=""                    # User find options on cmd line
+findDefOpt="-type f -size +0c"    # Default find options
+quantity="0"                      # Will hold counted result
+
+# Colored text...
+# FIXME: Add test if terminal is cabable of colored output
+txtBold=$(printf '\033[1m')       # Or bright, depend on your terminal
+txtClean=$(printf '\033[0m')      # All attributes off
+
+# Hint the user how to use me when called without argument
+[ "$#" -eq "0"  ] && set -- "-h"
+
+#
+# Check arguments
+#
+while getopts :h: opt # Keep help recognition away from other options
+do
+  [ "$opt" != "h" -a "$OPTARG" != "h" ] && continue
+  case $OPTARG in
+    l)  echo ""
+        # Adjust -B4 in case of copyright changes
+        grep -B4 -A13 -m1 "This program is free software" "$0" | cut -b2-
+        echo ""
+        exit ; ;;
+
+    s)  less "$0"
+        exit ; ;;
+
+    *)  # WTF? All because of some eye candy.
+        # Some OS needs 'echo -e' but some shell don't know 'echo -e'
+        out() { printf "$*\n" ; }
+
+        out "This is ${txtBold}Dup${txtClean}licate" \
+            "${txtBold}Fi${txtClean}nder (v$version, $vDate)"
+        out "Find identical files across your drives "
+        out ""
+        out "${txtBold}Usage:${txtClean}"
+        out "  $me [<options>] <path>... [<find-options>]"
+        out ""
+        out "${txtBold}Options are:${txtClean}"
+        out "  -h[c]   This help text, c=l License, c=s Source of $me"
+        out "  -d      Be dull, without calc checksum only for first 1M"
+        out "  -p      Print result list but not save, implies -q"
+        out "  -q      Be quiet as possible"
+        out "  -s      Show last or current results with less"
+        out ""
+        out "${txtBold}Notes:${txtClean}"
+        out "  • The collection of files is done by find utility, see that" \
+            "man page for details"
+        out "  • In any case the find options '$findDefOpt' will added"
+        out "  • It works in two main steps: 1. Collect files with same"    \
+            "size, 2. Filter files by same checksum"
+        out "  • The <find-options> will be pre-parsed where parentheses "  \
+            "and asterisk will escaped by a \ "
+        out "    so use quotes and only escape spaces, if one in your pattern"
+        out ""
+        out "${txtBold}Examples:${txtClean}"
+        out "  Simplest form, check current directory tree"
+        out "    dupfi ."
+        out ""
+        out "  To show last result list"
+        out "    dupfi -s"
+        out ""
+        out "  Check two specific directory trees and show result immediately"
+        out "    dupfi -s data/documents data/pictures"
+        out ""
+        out "  Using find options can be tricky:"
+        out "    dupfi . '( -iname *.txt -o -iname *.jpg )'    # check"     \
+            "only *.txt and *.jpg files"
+        out "    dupfi .  ! -path '*/.*'                       # Ignore"    \
+            "hidden directories"
+        out ""
+        exit ; ;;
+  esac
+done
+
+OPTIND="1"
+while getopts ?dhpqsS opt
+do
+  case $opt in
+
+    d)  optDull="1"   ; ;;
+    p)  optQuiet="1"
+        optPrint="1"  ; ;;
+
+    q)  optQuiet="1"  ; ;;
+    s)  optShow="1"   ; ;;
+
+    \?) echo "Need help? Use: $me -h" >&2
+        exit 1        ; ;;
+
+  esac
+done
+
+shift $(( $OPTIND - 1 ))
+
+if [ "$#" -eq "0"  -a  "$optShow" -eq "0" ] ; then
+  # We will only read this  when -- was given due to forced help option above
+  echo "$me: [Error] Missing path as argument" >&2
+  exit 1
+
+elif [ "$#" -gt "0" ] ; then
+  # Validate path arguments until - or ( is found
+  # FIXME: Ideas how to validate find options?
+  #        I didn't find something like "find --dry-run"
+  err="0"
+  for p in "$@"
+  do
+    case "$p" in
+      \-* | \(* | !* | \\* | ' '*)
+          break; ;;
+      *)
+          if [ ! -d "$p" ] ; then
+            echo "$me: [Error] Not a valid path: $p" >&2
+            err="1"
+          else
+            startDir="$startDir $p"
+            startDir="${startDir%/}"      # remove trailing slash, if one
+            shift
+          fi; ;;
+    esac
+  done
+
+  [ "$err" -eq "1" ] && exit 1
+
+  unset err p
+  findOptions="$@"
+fi
+
+# Escape * and () with \ to be more user friendly (hopeful without drawback)
+findOptions=$(echo "$findOptions" | sed -e "s/\*/\\\*/g" \
+                                        -e "s/(/\\\\(/g" \
+                                        -e "s/)/\\\\)/g" )
+
+#
+# Functions
+#
+
+# WTF? Look at http://wiki.bash-hackers.org/howto/collapsing_functions
+if [ "$optQuiet" -eq "1" ] ; then
+     print() { : ; }
+     pgInfo() { : ; }
+     pgDone() { : ; }
+     pgBreak() { exit ; }
+     countQuantity() { : ; }
+else
+  print() { printf "$@"; }
+
+  infoTxt=""
+  pgInfo() { # Progress Info
+    infoTxt="$1"
+    print "%s...\r" "$infoTxt"
+  }
+
+  pad=".................................................."
+  pgDone() { # Progress Done
+    print "\r%-.50s[DONE] %s\n" "$infoTxt$pad" "$1"
+  }
+
+  pgBreak() { # Ctrl-C handler
+    print "\r%-.50s[ABORTED] %s\n" "$infoTxt$pad" "$1"
+    exit
+  }
+
+  countQuantity() {
+    # Most of the times would quantity=$(wc -l < "$fileList") do the job
+    # but at last we have to care about empty lines, so it need some effort
+    # quantity=$(nl -w1 "$1" | tail -1 | cut -f1) or how is
+    quantity=$(grep -c . "$1")
+  }
+fi
+
+checkIfSuccess() {
+  if [ ! -s "$1" ] ; then
+    print "No duplicates found below %s\n" "$startDir"
+    exit
+  fi
+}
+
+showResults() {
+  if [ -f "$HOME/.$me/duplicates" ] ; then
+    less -S "$HOME/.$me/duplicates"
+  else
+    print "No results to show\n"
+  fi
+
+  exit
+}
+
+# Check for option show so late because of "print" inside of showResults()
+if [ "$#" -eq "0"  -a  "$optShow" -eq "1" ] ; then
+  showResults
+  exit
+fi
+
+tmpDir=$(mktemp -td "$me.XXXX") || exit 1
+fileList="$tmpDir/fileList"
+fileSort="$tmpDir/fileSort"
+fileUniq="$tmpDir/fileUniq"
+
+# Ensure to clean up when we are done
+trap "rm -rf $tmpDir" EXIT
+# Catch Ctrl-C
+trap "pgBreak" INT
+
+# Collect a list of all files in a format of
+#   <12DigitSize><tab><pfad/to/filename>
+print "Execute: find $startDir $findOptions $findDefOpt\n"
+pgInfo "Collect files"
+# Using notorious eval :-/
+eval find $startDir $findOptions $findDefOpt \
+          -fprintf $fileList "'%12s\t%h/%f\n'" || exit 1
+
+countQuantity "$fileList"
+pgDone "Found $quantity files"
+
+pgInfo "Sort and filter files by same size"
+# Sort the list by the file size in field 1
+sort -n -k1 "$fileList" > "$fileSort"
+
+# Filter all files with a matching size
+uniq -w12 -D "$fileSort" > "$fileUniq"
+
+countQuantity "$fileUniq"
+pgDone "Found $quantity candidates"
+
+checkIfSuccess "$fileUniq"
+
+# This way it works with spaces in filenames
+# and offer the possibility for a nice progress info
+rm "$fileList"
+i="0"
+while read size file
+do
+  i=$((i + 1))
+  pgInfo "Calc checksum for file $i of $quantity"
+  [ ! -r "$file" ] && continue # Silently ignore not readable files
+
+  # Calc ckecksum, output has the friendly format
+  #   <32byte-md5sum><2spaces><pfad/to/filename>
+  # but we want to keep the size in front
+  if [ "$optDull" -eq "1" -o "$size" -lt "2000000" ] ; then
+  # We check for size because piping dd|md5sum would lasts longer
+  # than it could save time on small files
+    checkSum=$(md5sum "$file")
+    printf "%12s %s\n" "$size" "$checkSum" >> "$fileList"
+
+  else
+  # Now, md5sum print a hyphen instead of filename
+    checkSum=$(dd if="$file" bs=1M count=1 status=none | md5sum)
+    printf "%12s %s  %s\n" "$size" "${checkSum%  -}" "$file" >> "$fileList"
+  fi
+done < "$fileUniq"
+pgDone
+
+pgInfo "Sort and filter files by same checksum"
+sort -n -k1 -k2 "$fileList" > "$fileSort"
+
+# Only ckeck the md5sum if we have some winner
+uniq -f1 -w32 --all-repeated=separate "$fileSort" > "$fileUniq"
+countQuantity "$fileUniq"
+pgDone "Found $quantity duplicates"
+
+# Finally we want only the pfad/to/filename
+cut -b48- "$fileUniq" > "$fileList"
+
+checkIfSuccess "$fileList"
+
+if [ "$optPrint" -eq "1" ] ; then
+  cat "$fileList"
+else
+  # Save our hard work for later use
+  mkdir -p "$HOME/.$me"
+  cp "$fileList" "$HOME/.$me/duplicates"
+  print "Result saved as: %s/.%s/%s\n" "$HOME" "$me" "duplicates"
+
+  [ "$optShow" -eq "1" ] && showResults
+fi
